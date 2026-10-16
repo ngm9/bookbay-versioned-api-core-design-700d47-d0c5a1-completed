@@ -10,6 +10,7 @@ from app import application_metadata, configure_logging
 from app.db import Base, engine
 from app.routes_misc import router as misc_router
 from app.routes_v1 import router as v1_router
+from app.routes_v2 import router as v2_router
 
 configure_logging()
 logger = logging.getLogger("bookbay.http")
@@ -45,3 +46,4 @@ async def request_metrics(request: Request, call_next):
 
 app.include_router(v1_router)
 app.include_router(misc_router)
+app.include_router(v2_router)

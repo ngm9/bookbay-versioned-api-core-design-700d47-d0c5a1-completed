@@ -1,8 +1,7 @@
 import hashlib
-from decimal import Decimal
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -10,6 +9,7 @@ from sqlalchemy.orm import Session
 from app import errors, models, notifications, schemas
 from app.auth import AuthUser, get_current_user
 from app.db import get_db
+from app.services import OrderService, OrderServiceError
 
 router = APIRouter()
 
@@ -168,32 +168,31 @@ def remove_cart_item(cart_id: str, item_id: str, current: AuthUser = Depends(get
 
 
 @router.post("/createOrder", tags=["orders"])
-def create_order(payload: schemas.OrderCreate, background_tasks: BackgroundTasks, current: AuthUser = Depends(get_current_user), db: Session = Depends(get_db)):
-    cart = db.query(models.Cart).filter(models.Cart.id == payload.cart_id, models.Cart.user_id == current.id).first()
-    if cart is None:
-        return errors.not_found("cart", payload.cart_id)
-    address = db.query(models.Address).filter(models.Address.id == payload.address_id, models.Address.user_id == current.id).first()
-    if address is None:
-        return errors.bad_request("address_invalid", "Select an address owned by this account")
-    cart_rows = db.query(models.CartItem, models.Listing, models.Book).join(models.Listing, models.CartItem.listing_id == models.Listing.id).join(models.Book, models.Listing.book_id == models.Book.id).filter(models.CartItem.cart_id == cart.id).all()
-    if not cart_rows:
-        return errors.bad_request("empty_cart", "Cannot create an order from an empty cart")
-    total = Decimal("0.00")
-    for cart_item, listing, _ in cart_rows:
-        if listing.status != "active" or listing.quantity < cart_item.quantity:
-            return errors.bad_request("out_of_stock", f"Listing {listing.id} is no longer available")
-        total += listing.price * cart_item.quantity
-    order = models.Order(user_id=current.id, cart_id=cart.id, cart_version=cart.version, address_id=address.id, total=total, status="created")
-    db.add(order)
-    db.flush()
-    for cart_item, listing, book in cart_rows:
-        db.add(models.OrderItem(order_id=order.id, listing_id=listing.id, seller_id=listing.seller_id, title=book.title, unit_price=listing.price, quantity=cart_item.quantity))
-        listing.quantity -= cart_item.quantity
-        if listing.quantity == 0:
-            listing.status = "sold"
-    db.commit()
-    background_tasks.add_task(notifications.send_order_confirmation, current.id, order.id)
-    return {"orderId": order.id, "cartId": cart.id, "cartVersion": cart.version, "status": order.status, "total": float(order.total), "createdAt": order.created_at.isoformat()}
+def create_order(
+    payload: schemas.OrderCreate,
+    background_tasks: BackgroundTasks,
+    current: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    service = OrderService(db)
+    try:
+        result = service.create_from_cart(
+            user_id=current.id,
+            cart_id=payload.cart_id,
+            address_id=payload.address_id,
+            idempotency_key=idempotency_key,
+        )
+    except OrderServiceError as exc:
+        if exc.http_status == 404:
+            return errors.not_found("cart", payload.cart_id)
+        if exc.code == "idempotency_key_mismatch":
+            return errors.bad_request(exc.code, exc.message)
+        return errors.bad_request(exc.code, exc.message)
+
+    if result.is_new:
+        background_tasks.add_task(notifications.send_order_confirmation, current.id, result.order.id)
+    return result.legacy_body()
 
 
 @router.get("/order/{order_id}", tags=["orders"])

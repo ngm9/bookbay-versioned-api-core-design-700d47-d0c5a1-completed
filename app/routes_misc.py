@@ -1,4 +1,3 @@
-import base64
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -8,6 +7,7 @@ from sqlalchemy.orm import Session
 from app import models, notifications, schemas
 from app.auth import AuthUser, get_current_user
 from app.db import get_db
+from app.services import ListingService
 
 router = APIRouter()
 
@@ -26,24 +26,15 @@ def create_listing(payload: schemas.ListingCreate, current: AuthUser = Depends(g
 
 @router.get("/listings/all", tags=["listings"])
 def all_listings(cursor: str | None = None, limit: int = Query(20, ge=1, le=100), db: Session = Depends(get_db)):
-    query = db.query(models.Listing, models.Book).join(models.Book, models.Listing.book_id == models.Book.id).filter(models.Listing.status == "active")
-    if cursor:
-        decoded = base64.urlsafe_b64decode(cursor.encode()).decode()
-        query = query.filter(models.Listing.id > decoded)
-    rows = query.order_by(models.Listing.id).limit(limit + 1).all()
-    more = len(rows) > limit
-    rows = rows[:limit]
-    next_cursor = base64.urlsafe_b64encode(rows[-1][0].id.encode()).decode() if more and rows else None
-    return {"data": [{"id": listing.id, "seller_id": listing.seller_id, "book": {"id": book.id, "title": book.title, "author": book.author}, "price": str(listing.price), "condition": listing.condition} for listing, book in rows], "next_cursor": next_cursor}
+    return ListingService(db).list_active_legacy(cursor=cursor, limit=limit)
 
 
 @router.get("/listings/{listing_id}", tags=["listings"])
 def get_listing(listing_id: str, db: Session = Depends(get_db)):
-    row = db.query(models.Listing, models.Book, models.User).join(models.Book, models.Listing.book_id == models.Book.id).join(models.User, models.Listing.seller_id == models.User.id).filter(models.Listing.id == listing_id).first()
-    if row is None:
+    detail = ListingService(db).get_legacy_detail(listing_id)
+    if detail is None:
         return {"error": "listing not found", "status": 404}
-    listing, book, seller = row
-    return {"listingId": listing.id, "sellerId": listing.seller_id, "sellerName": seller.display_name, "bookId": book.id, "title": book.title, "author": book.author, "isbn": book.isbn, "price": float(listing.price), "condition": listing.condition, "notes": listing.notes, "available": listing.quantity}
+    return detail
 
 
 @router.patch("/listings/{listing_id}", tags=["listings"])
